@@ -182,8 +182,9 @@ const MIN_SPEED: f64 = 0.2;
 /// the other. The initial word pace is `delay` (default: 1 s per word).
 ///
 /// The display is two lines, redrawn in place with ANSI escapes (no
-/// scrolling): a status line with the current speed and a word line with the
-/// current word and progress. Keys while running:
+/// scrolling): a status line with the current speed and progress, and a word
+/// line with the current word centered in the middle of the terminal. Keys
+/// while running:
 ///
 /// | key                    | effect                         |
 /// |------------------------|--------------------------------|
@@ -236,8 +237,8 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
     loop {
         // Redraw (in place) whenever the word, speed, or pause state changed.
         if dirty {
-            let status = status_line(speed, paused);
-            let word_line = format!("[{:5}/{}]  {}", idx, words.len(), words[idx]);
+            let status = status_line(speed, paused, idx, words.len());
+            let word_line = center_word(words[idx], terminal_width());
             if first_draw {
                 print!("\x1b[2K{status}\n\x1b[2K{word_line}");
                 first_draw = false;
@@ -261,10 +262,11 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
         }
 
         // Wait for the next word change, or for a key press in the meantime.
+        // (No extra margin: the deadline is re-checked at the top of the loop.)
         let timeout = if paused {
             Duration::from_millis(50)
         } else {
-            next_change.saturating_duration_since(Instant::now()) + Duration::from_millis(10)
+            next_change.saturating_duration_since(Instant::now())
         };
 
         if *keys_work {
@@ -306,16 +308,29 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
     }
 }
 
-/// The status line: current speed plus a short key reference (or pause hint).
-fn status_line(speed: f64, paused: bool) -> String {
+/// The status line: speed, progress, and a short key reference (or pause hint).
+fn status_line(speed: f64, paused: bool, idx: usize, total: usize) -> String {
+    let progress = format!("[{idx:5}/{}]", total);
     if paused {
-        format!("PAUSED — space to resume   |   speed {speed:.1} words/s")
+        format!("PAUSED — space to resume   |   speed {speed:.1} words/s   {progress}")
     } else {
         format!(
-            "speed {speed:.1} words/s ({per:.2} s/word)   +/- speed   space pause   q quit",
+            "speed {speed:.1} words/s ({per:.2} s/word)   {progress}   +/- speed   space pause   q quit",
             per = 1.0 / speed
         )
     }
+}
+
+/// Current terminal width in characters, falling back to 80 (e.g. no TTY).
+fn terminal_width() -> usize {
+    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
+}
+
+/// Center a word in a line `width` characters wide (no padding if too wide).
+fn center_word(word: &str, width: usize) -> String {
+    let len = word.chars().count().min(width);
+    let pad = (width - len) / 2;
+    format!("{}{}", " ".repeat(pad), word)
 }
 
 // --- EPUB internals ---------------------------------------------------------

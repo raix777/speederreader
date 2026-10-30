@@ -22,3 +22,6 @@ Keys while the display is running:
 | `-`        | slow down by 5 words/s    |
 | `space`    | pause / resume            |
 | `q` / Esc  | quit (`Ctrl+C` also works) |
+
+The word is centered in the middle of the terminal; the speed and progress
+(`[ n/total ]`) are shown on the status line above it.
