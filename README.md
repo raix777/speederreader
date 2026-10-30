@@ -23,5 +23,6 @@ Keys while the display is running:
 | `space`    | pause / resume            |
 | `q` / Esc  | quit (`Ctrl+C` also works) |
 
-The word is centered in the middle of the terminal; the speed and progress
-(`[ n/total ]`) are shown on the status line above it.
+Each word is rendered as giant block letters (a built-in 5x7 font stretched
+to fill the whole terminal), so every word fills the screen. The speed and
+progress (`[ n/total ]`) are shown on the status line at the top.

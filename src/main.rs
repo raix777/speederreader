@@ -15,8 +15,9 @@
 //!
 //! With `--read` it becomes a rapid-serial display (RSVP): the words of the
 //! book are shown in the terminal one after the other, the word changes every
-//! second (configurable with `--delay`). While running, `+`/`=` increase the
-//! speed by 5 words/s, `-` decreases it, `space` pauses/resumes, `q` quits.
+//! second (configurable with `--delay`). Each word is drawn as giant block
+//! letters that fill the screen. While running, `+`/`=` increase the speed by
+//! 5 words/s, `-` decreases it, `space` pauses/resumes, `q` quits.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -181,9 +182,9 @@ const MIN_SPEED: f64 = 0.2;
 /// Rapid-serial display: show the book's words in the terminal, one after
 /// the other. The initial word pace is `delay` (default: 1 s per word).
 ///
-/// The display is two lines, redrawn in place with ANSI escapes (no
-/// scrolling): a status line with the current speed and progress, and a word
-/// line with the current word centered in the middle of the terminal. Keys
+/// The display is full-screen: the status line (speed, progress, key
+/// reference) on the top row, and the current word rendered as giant block
+/// letters (5x7 font, stretched to fill the rest of the terminal). Keys
 /// while running:
 ///
 /// | key                    | effect                         |
@@ -210,16 +211,23 @@ fn rsvp_display(epub: &Epub, delay: Duration) {
     let initial_speed = 1.0 / delay.as_secs_f64(); // words per second
     let raw_mode = crossterm::terminal::enable_raw_mode().is_ok();
     let mut keys_work = raw_mode;
+    // Full-screen display: hide the cursor and disable autowrap (no scrolling).
+    let mut term = std::io::stdout();
+    term.write_all(b"\x1b[?25l\x1b[?7l").ok();
+    term.flush().ok();
     let shown = display_loop(&words, initial_speed, &mut keys_work);
     if raw_mode {
         crossterm::terminal::disable_raw_mode().ok();
     }
+    // Restore the terminal and clear the giant letters.
+    term.write_all(b"\x1b[?7h\x1b[?25h\x1b[H\x1b[2J").ok();
+    term.flush().ok();
 
-    // Leave the terminal on a clean line and summarize.
+    // Summarize on a clean screen.
     if shown == words.len() {
-        println!("\x1b[2K\x1b[1GDone: {} words displayed.", words.len());
+        println!("Done: {} words displayed.", words.len());
     } else {
-        println!("\x1b[2K\x1b[1GStopped: {} of {} words displayed.", shown, words.len());
+        println!("Stopped: {} of {} words displayed.", shown, words.len());
     }
 }
 
@@ -231,22 +239,13 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
     let mut paused = false;
     let mut idx = 0;
     let mut next_change = Instant::now() + step(speed);
-    let mut first_draw = true;
     let mut dirty = true;
 
     loop {
-        // Redraw (in place) whenever the word, speed, or pause state changed.
+        // Redraw the whole screen whenever the word, speed, or pause state
+        // changed. One buffered write per frame, so the screen does not flicker.
         if dirty {
-            let status = status_line(speed, paused, idx, words.len());
-            let word_line = center_word(words[idx], terminal_width());
-            if first_draw {
-                print!("\x1b[2K{status}\n\x1b[2K{word_line}");
-                first_draw = false;
-            } else {
-                // Back one line to the status line, then rewrite both lines.
-                print!("\x1b[1F\x1b[2K{status}\n\x1b[2K{word_line}");
-            }
-            std::io::stdout().flush().ok();
+            draw_frame(words[idx], speed, paused, idx, words.len());
             dirty = false;
         }
 
@@ -321,16 +320,163 @@ fn status_line(speed: f64, paused: bool, idx: usize, total: usize) -> String {
     }
 }
 
-/// Current terminal width in characters, falling back to 80 (e.g. no TTY).
-fn terminal_width() -> usize {
-    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
+/// Draw one frame: the status line on the top row and the word as giant
+/// block letters filling the rest of the terminal.
+fn draw_frame(word: &str, speed: f64, paused: bool, idx: usize, total: usize) {
+    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+    let area_w = tw.max(8) as usize;
+    let area_h = (th.saturating_sub(1)).max(2) as usize;
+    let (bw, bmp) = rasterize(word);
+    let screen = stretch(&bmp, bw, area_w, area_h);
+
+    let mut frame = String::with_capacity(area_w * area_h + 128);
+    frame.push_str("\x1b[H"); // home: overwrite the previous frame from the top
+    frame.push_str(&status_line(speed, paused, idx, total));
+    frame.push('\n');
+    for row in &screen {
+        for px in row {
+            frame.push(if *px { '█' } else { ' ' });
+        }
+        frame.push('\n');
+    }
+    let mut out = std::io::stdout();
+    out.write_all(frame.as_bytes()).ok();
+    out.flush().ok();
 }
 
-/// Center a word in a line `width` characters wide (no padding if too wide).
-fn center_word(word: &str, width: usize) -> String {
-    let len = word.chars().count().min(width);
-    let pad = (width - len) / 2;
-    format!("{}{}", " ".repeat(pad), word)
+/// Rasterize a word with the 5x7 block font: 7 rows, 6px per character
+/// (5px glyph + 1px spacing).
+fn rasterize(word: &str) -> (usize, Vec<Vec<bool>>) {
+    let chars: Vec<char> = word.chars().collect();
+    let width = if chars.is_empty() { 1 } else { 6 * chars.len() - 1 };
+    let mut bmp = vec![vec![false; width]; 7];
+    for (i, c) in chars.iter().enumerate() {
+        let g = glyph(*c);
+        for r in 0..7 {
+            for b in 0..5u8 {
+                if g[r] & (1 << (4 - b)) != 0 {
+                    bmp[r][i * 6 + b as usize] = true;
+                }
+            }
+        }
+    }
+    (width, bmp)
+}
+
+/// Nearest-neighbor stretch of the 7-row bitmap to exactly `aw` x `ah` cells,
+/// so the word always fills its whole area (aspect ratio is not preserved).
+fn stretch(bmp: &[Vec<bool>], bw: usize, aw: usize, ah: usize) -> Vec<Vec<bool>> {
+    let bw = bw.max(1);
+    (0..ah)
+        .map(|r| {
+            let src_r = r * 7 / ah;
+            (0..aw).map(|c| bmp[src_r][c * bw / aw]).collect()
+        })
+        .collect()
+}
+
+/// The 5x7 glyph for a character (bit 4 = leftmost pixel). ASCII plus common
+/// accented letters; anything else becomes an outline box.
+fn glyph(c: char) -> [u8; 7] {
+    match c {
+        ' ' => [0, 0, 0, 0, 0, 0, 0],
+        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'B' => [0b11110, 0b10001, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110],
+        'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
+        'D' => [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100],
+        'E' => [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b11111],
+        'F' => [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b10000],
+        'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        'H' => [0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001, 0b10001],
+        'I' => [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100],
+        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
+        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        'a' => [0, 0, 0b01110, 0b00001, 0b01110, 0b10001, 0b01111],
+        'b' => [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b11110],
+        'c' => [0, 0, 0b01110, 0b10000, 0b10000, 0b10001, 0b01110],
+        'd' => [0b00001, 0b00001, 0b01101, 0b10011, 0b10001, 0b10001, 0b01111],
+        'e' => [0, 0, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110],
+        'f' => [0b00110, 0b01001, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000],
+        'g' => [0, 0b01111, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+        'h' => [0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+        'i' => [0b00100, 0, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'j' => [0b00010, 0, 0b00110, 0b00010, 0b00010, 0b10010, 0b01100],
+        'k' => [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010],
+        'l' => [0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'm' => [0, 0, 0b11010, 0b10101, 0b10101, 0b10001, 0b10001],
+        'n' => [0, 0, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+        'o' => [0, 0, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+        'p' => [0, 0, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000],
+        'q' => [0, 0, 0b01101, 0b10011, 0b01111, 0b00001, 0b00001],
+        'r' => [0, 0, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000],
+        's' => [0, 0, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110],
+        't' => [0b01000, 0b01000, 0b11100, 0b01000, 0b01000, 0b01001, 0b00110],
+        'u' => [0, 0, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'v' => [0, 0, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        'w' => [0, 0, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010],
+        'x' => [0, 0, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001],
+        'y' => [0, 0, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+        'z' => [0, 0, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111],
+        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+        '3' => [0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110],
+        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+        '5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
+        '6' => [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
+        '.' => [0, 0, 0, 0, 0, 0b00110, 0b00110],
+        ',' => [0, 0, 0, 0, 0b00110, 0b00100, 0b01000],
+        ';' => [0, 0, 0b00110, 0, 0b00110, 0b00100, 0b01000],
+        ':' => [0, 0b00110, 0b00110, 0, 0b00110, 0b00110, 0],
+        '!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0, 0b00100],
+        '?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0, 0b00100],
+        '\'' => [0b00100, 0b00100, 0b01000, 0, 0, 0, 0],
+        '\u{2018}' | '\u{2019}' => [0b00100, 0b00100, 0b01000, 0, 0, 0, 0],
+        '"' => [0b01010, 0b01010, 0b01010, 0, 0, 0, 0],
+        '\u{201C}' | '\u{201D}' => [0b01010, 0b01010, 0b01010, 0, 0, 0, 0],
+        '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        '-' => [0, 0, 0, 0b01110, 0, 0, 0],
+        '\u{2013}' | '\u{2014}' => [0, 0, 0, 0b01110, 0, 0, 0],
+        '/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
+        '\\' => [0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001],
+        '@' => [0b01110, 0b10001, 0b10111, 0b10101, 0b10110, 0b10000, 0b01111],
+        '#' => [0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010],
+        '&' => [0b01100, 0b10010, 0b10100, 0b01010, 0b10101, 0b10010, 0b01101],
+        '%' => [0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011],
+        '+' => [0, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0],
+        '*' => [0, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0],
+        '=' => [0, 0, 0b11111, 0, 0b11111, 0, 0],
+        '_' => [0, 0, 0, 0, 0, 0, 0b11111],
+        '[' => [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110],
+        ']' => [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110],
+        '|' => [0b00100; 7],
+        '~' => [0, 0, 0b01000, 0b10101, 0b00010, 0, 0],
+        'ä' => [0b01010, 0, 0b01110, 0b00001, 0b01110, 0b10001, 0b01111],
+        'ö' => [0b01010, 0, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+        'ü' => [0b01010, 0, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'ß' => [0b11110, 0b10001, 0b10001, 0b01110, 0b00010, 0b00010, 0b00010],
+        'é' => [0b00010, 0b00100, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110],
+        _ => [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111],
+    }
 }
 
 // --- EPUB internals ---------------------------------------------------------
