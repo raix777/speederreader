@@ -1,0 +1,10 @@
+[package]
+name = "speederreader"
+version = "0.1.0"
+edition = "2021"
+description = "Load and inspect EPUB ebooks for fast reading"
+
+[dependencies]
+zip = "9"
+roxmltree = "0.20"
+crossterm = "0.28"
