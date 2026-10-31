@@ -8,7 +8,8 @@ polished.
 Rust CLI that loads an EPUB (a ZIP with a small, well-defined XML layout) and
 shows its reading structure. By default it runs a rapid-serial display (RSVP):
 the book's words appear in the terminal one after the other, each drawn as giant
-block letters (a built-in 5x7 font) as big as fits while keeping its aspect
+block letters (a built-in 18-row variable-width font baked from Liberation
+Sans Bold) as big as fits while keeping its aspect
 ratio, centered on screen. A chapter/word summary is available with `--summary`,
 and the full text with `--text`. Pure Rust, no hardware; every behavior is
 unit-testable without an EPUB.
