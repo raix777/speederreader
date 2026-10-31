@@ -9,15 +9,17 @@
 //! <dir>/*.xhtml               the actual readable content
 //! ```
 //!
-//! This program opens the archive, walks that layout, extracts the readable
-//! text of each spine item in reading order, and prints a summary (or the full
-//! text with `--text`).
+//! By default this program opens the archive, walks that layout, extracts the
+//! readable text of each spine item in reading order, and shows the book as a
+//! rapid-serial display (RSVP): the words appear in the terminal one after the
+//! other, the word changing every second (configurable with `--delay`). Each
+//! word is drawn as giant block letters, as big as fits while keeping its
+//! aspect ratio, centered in the terminal. A chapter summary is available with
+//! `--summary`, and the full text with `--text`.
 //!
-//! With `--read` it becomes a rapid-serial display (RSVP): the words of the
-//! book are shown in the terminal one after the other, the word changes every
-//! second (configurable with `--delay`). Each word is drawn as giant block
-//! letters that fill the screen. While running, `+`/`=` increase the speed by
-//! 5 words/s, `-` decreases it, `space` pauses/resumes, `q` quits.
+//! While the display runs, `+`/`=` increase the speed by 5 words/s, `-`
+//! decreases it, `space` pauses/resumes, `p` pauses and shows the last 30 words
+//! plus the current word in the normal font, and `q` quits.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -107,6 +109,7 @@ impl Epub {
 
 fn main() {
     let mut print_text = false;
+    let mut summary = false;
     let mut read_mode = false;
     let mut delay = std::time::Duration::from_secs(1);
     let mut path: Option<String> = None;
@@ -124,6 +127,7 @@ fn main() {
         }
         match a.as_str() {
             "--text" | "-t" => print_text = true,
+            "--summary" | "-s" => summary = true,
             "--read" | "-r" | "--rsvp" => read_mode = true,
             "--delay" => skip_next = true,
             other if !other.starts_with('-') => path = Some(other.to_string()),
@@ -140,7 +144,8 @@ fn main() {
         }
     };
 
-    if read_mode {
+    // The default view is the word display; the summary is opt-in.
+    if read_mode || (!print_text && !summary) {
         rsvp_display(&epub, delay);
         return;
     }
@@ -184,14 +189,17 @@ const MIN_SPEED: f64 = 0.2;
 ///
 /// The display is full-screen: the status line (speed, progress, key
 /// reference) on the top row, and the current word rendered as giant block
-/// letters (5x7 font, stretched to fill the rest of the terminal). Keys
-/// while running:
+/// letters (5x7 font) as big as fits while keeping its aspect ratio, centered
+/// in the rest of the terminal. Keys while running:
 ///
 /// | key                    | effect                         |
 /// |------------------------|--------------------------------|
 /// | `+` or `=`             | speed up by 5 words/s          |
 /// | `-`                    | slow down by 5 words/s         |
 /// | `space`                | pause / resume                 |
+/// | `p`                    | pause + show the last 30 words |
+/// |                        | and the current word in the    |
+/// |                        | normal font (again: resume)    |
 /// | `q`, `Esc`, `Ctrl+C`   | quit                           |
 ///
 /// If the terminal does not support raw mode (e.g. stdin is not a TTY), the
@@ -237,6 +245,7 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
 
     let mut speed = initial_speed;
     let mut paused = false;
+    let mut review = false; // paused + showing the last 30 words in normal font
     let mut idx = 0;
     let mut next_change = Instant::now() + step(speed);
     let mut dirty = true;
@@ -245,12 +254,16 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
         // Redraw the whole screen whenever the word, speed, or pause state
         // changed. One buffered write per frame, so the screen does not flicker.
         if dirty {
-            draw_frame(words[idx], speed, paused, idx, words.len());
+            if review {
+                draw_review_frame(words, speed, idx, words.len());
+            } else {
+                draw_frame(words[idx], speed, paused, idx, words.len());
+            }
             dirty = false;
         }
 
-        // Advance to the next word once its time is up (unless paused).
-        if !paused && Instant::now() >= next_change {
+        // Advance to the next word once its time is up (unless paused/reviewing).
+        if !paused && !review && Instant::now() >= next_change {
             idx += 1;
             if idx >= words.len() {
                 return idx;
@@ -262,7 +275,7 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
 
         // Wait for the next word change, or for a key press in the meantime.
         // (No extra margin: the deadline is re-checked at the top of the loop.)
-        let timeout = if paused {
+        let timeout = if paused || review {
             Duration::from_millis(50)
         } else {
             next_change.saturating_duration_since(Instant::now())
@@ -287,7 +300,15 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
                                 next_change = Instant::now() + step(speed);
                             }
                             KeyCode::Char(' ') => {
-                                paused = !paused;
+                                if review {
+                                    review = false; // leave the review view, resume
+                                } else {
+                                    paused = !paused;
+                                }
+                                next_change = Instant::now() + step(speed);
+                            }
+                            KeyCode::Char('p') => {
+                                review = !review;
                                 next_change = Instant::now() + step(speed);
                             }
                             KeyCode::Char('q') | KeyCode::Esc => {
@@ -308,40 +329,122 @@ fn display_loop(words: &[&str], initial_speed: f64, keys_work: &mut bool) -> usi
 }
 
 /// The status line: speed, progress, and a short key reference (or pause hint).
-fn status_line(speed: f64, paused: bool, idx: usize, total: usize) -> String {
+fn status_line(speed: f64, paused: bool, review: bool, idx: usize, total: usize) -> String {
     let progress = format!("[{idx:5}/{}]", total);
-    if paused {
+    if review {
+        format!(
+            "PAUSED (review) — p to resume   |   speed {speed:.1} words/s   {progress}"
+        )
+    } else if paused {
         format!("PAUSED — space to resume   |   speed {speed:.1} words/s   {progress}")
     } else {
         format!(
-            "speed {speed:.1} words/s ({per:.2} s/word)   {progress}   +/- speed   space pause   q quit",
+            "speed {speed:.1} words/s ({per:.2} s/word)   {progress}   +/- speed   space pause   p review   q quit",
             per = 1.0 / speed
         )
     }
 }
 
-/// Draw one frame: the status line on the top row and the word as giant
-/// block letters filling the rest of the terminal.
+/// Terminal size, falling back to 80x24 when unknown (also for a 0x0 pty).
+fn term_size() -> (u16, u16) {
+    let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+    if w == 0 || h == 0 {
+        (80, 24)
+    } else {
+        (w, h)
+    }
+}
+
+/// Assemble a full-screen frame from `lines` (one per row), each placed at
+/// column 0 of its own row and padded to `width` cells so the row is fully
+/// overwritten (no residue from a longer previous row). `\x1b[H` homes the
+/// first line; every later line is prefixed with `\r\n`, whose carriage return
+/// returns the cursor to column 0 (a bare `\n` keeps the previous column, which
+/// would push the word off to the right and make it vanish). No feed follows
+/// the last line, so the screen never scrolls.
+fn build_frame(width: usize, lines: &[String]) -> String {
+    let mut frame = String::with_capacity(width * lines.len() + 8);
+    frame.push_str("\x1b[H");
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            frame.push_str("\r\n");
+        }
+        frame.push_str(line);
+        for _ in 0..width.saturating_sub(line.chars().count()) {
+            frame.push(' ');
+        }
+    }
+    frame
+}
+
+/// Write a frame to stdout and flush it (one buffered write per frame, so the
+/// screen does not flicker).
+fn write_frame(width: usize, lines: &[String]) {
+    let mut out = std::io::stdout();
+    out.write_all(build_frame(width, lines).as_bytes()).ok();
+    out.flush().ok();
+}
+
+/// Draw one frame: the status line on the top row and the word as giant block
+/// letters, as big as fits while keeping its aspect ratio, centered below it.
 fn draw_frame(word: &str, speed: f64, paused: bool, idx: usize, total: usize) {
-    let (tw, th) = crossterm::terminal::size().unwrap_or((80, 24));
+    let (tw, th) = term_size();
     let area_w = tw.max(8) as usize;
     let area_h = (th.saturating_sub(1)).max(2) as usize;
     let (bw, bmp) = rasterize(word);
-    let screen = stretch(&bmp, bw, area_w, area_h);
+    let grid = scale_centered(&bmp, bw, area_w, area_h);
 
-    let mut frame = String::with_capacity(area_w * area_h + 128);
-    frame.push_str("\x1b[H"); // home: overwrite the previous frame from the top
-    frame.push_str(&status_line(speed, paused, idx, total));
-    frame.push('\n');
-    for row in &screen {
-        for px in row {
-            frame.push(if *px { '█' } else { ' ' });
-        }
-        frame.push('\n');
+    let mut lines = Vec::with_capacity(area_h + 1);
+    lines.push(status_line(speed, paused, false, idx, total));
+    lines.extend(grid);
+    write_frame(area_w, &lines);
+}
+
+/// Draw the review frame (`p` key): the status line, the current word, and
+/// the last 30 words, all in the normal terminal font instead of the giant
+/// block letters.
+fn draw_review_frame(words: &[&str], speed: f64, idx: usize, total: usize) {
+    const TRAIL_WORDS: usize = 30;
+    let (tw, th) = term_size();
+    let width = tw.max(8) as usize;
+    let height = (th.saturating_sub(1)).max(1) as usize;
+
+    let start = idx.saturating_sub(TRAIL_WORDS);
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(format!("current: {}", words[idx]));
+    rows.push(format!("last {} words:", idx - start));
+    rows.extend(wrap_text(&words[start..idx].join(" "), width));
+
+    let mut lines = Vec::with_capacity(height + 1);
+    lines.push(status_line(speed, true, true, idx, total));
+    // Exactly `height` content rows (blanks pad the tail); `build_frame`
+    // clears each one to the full width.
+    for r in 0..height {
+        lines.push(rows.get(r).cloned().unwrap_or_default());
     }
-    let mut out = std::io::stdout();
-    out.write_all(frame.as_bytes()).ok();
-    out.flush().ok();
+    write_frame(width, &lines);
+}
+
+/// Word-wrap `text` so every line fits in at most `width` columns.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut rows: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for w in text.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(w);
+        } else if line.chars().count() + 1 + w.chars().count() <= width {
+            line.push(' ');
+            line.push_str(w);
+        } else {
+            rows.push(std::mem::take(&mut line));
+            line.push_str(w);
+        }
+    }
+    if !line.is_empty() {
+        rows.push(line);
+    }
+    rows
 }
 
 /// Rasterize a word with the 5x7 block font: 7 rows, 6px per character
@@ -363,16 +466,32 @@ fn rasterize(word: &str) -> (usize, Vec<Vec<bool>>) {
     (width, bmp)
 }
 
-/// Nearest-neighbor stretch of the 7-row bitmap to exactly `aw` x `ah` cells,
-/// so the word always fills its whole area (aspect ratio is not preserved).
-fn stretch(bmp: &[Vec<bool>], bw: usize, aw: usize, ah: usize) -> Vec<Vec<bool>> {
-    let bw = bw.max(1);
-    (0..ah)
-        .map(|r| {
-            let src_r = r * 7 / ah;
-            (0..aw).map(|c| bmp[src_r][c * bw / aw]).collect()
-        })
-        .collect()
+/// Scale the 7-row glyph bitmap as large as fits in `aw` x `ah` cells while
+/// keeping its aspect ratio, and place it centered in a blank grid.
+fn scale_centered(bmp: &[Vec<bool>], bw: usize, aw: usize, ah: usize) -> Vec<String> {
+    let scale = (aw / bw.max(1)).min(ah / 7).max(1);
+    let word_w = bw * scale;
+    let word_h = 7 * scale;
+    let left = (aw.saturating_sub(word_w)) / 2;
+    let top = (ah.saturating_sub(word_h)) / 2;
+
+    let mut grid: Vec<Vec<char>> = vec![vec![' '; aw]; ah];
+    for (r, row) in bmp.iter().enumerate() {
+        for (c, px) in row.iter().enumerate() {
+            if *px {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let y = top + r * scale + dy;
+                        let x = left + c * scale + dx;
+                        if y < ah && x < aw {
+                            grid[y][x] = '█';
+                        }
+                    }
+                }
+            }
+        }
+    }
+    grid.into_iter().map(|row| row.into_iter().collect()).collect()
 }
 
 /// The 5x7 glyph for a character (bit 4 = leftmost pixel). ASCII plus common
@@ -690,4 +809,76 @@ fn join_paths(base: &str, relative: &str) -> String {
         }
     }
     parts.join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (top, bottom, left, right) of the inked cells, or None if the grid is blank.
+    fn ink_bbox(grid: &[String]) -> Option<(usize, usize, usize, usize)> {
+        let (mut top, mut bottom) = (usize::MAX, 0usize);
+        let (mut left, mut right) = (usize::MAX, 0usize);
+        for (y, row) in grid.iter().enumerate() {
+            for (x, ch) in row.chars().enumerate() {
+                if ch == '█' {
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                    left = left.min(x);
+                    right = right.max(x);
+                }
+            }
+        }
+        if top == usize::MAX {
+            None
+        } else {
+            Some((top, bottom, left, right))
+        }
+    }
+
+    #[test]
+    fn every_word_fits_the_terminal_and_is_drawn() {
+        for len in [1usize, 2, 5, 10, 20, 50, 200] {
+            let word = "a".repeat(len);
+            let (bw, bmp) = rasterize(&word);
+            let grid = scale_centered(&bmp, bw, 80, 23);
+            assert_eq!(grid.len(), 23, "word of length {len}");
+            for (i, row) in grid.iter().enumerate() {
+                assert_eq!(row.chars().count(), 80, "row {i}, word of length {len}");
+            }
+            assert!(
+                grid.iter().any(|r| r.contains('█')),
+                "word of length {len} was not drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_height_word_is_centered_both_ways() {
+        let (bw, bmp) = rasterize("H");
+        let grid = scale_centered(&bmp, bw, 80, 23);
+        let (top, bottom, left, right) = ink_bbox(&grid).expect("word not drawn");
+        assert!(left.abs_diff(80 - right - 1) <= 1, "left {left} right {right}");
+        assert!(top.abs_diff(23 - bottom - 1) <= 1, "top {top} bottom {bottom}");
+    }
+
+    #[test]
+    fn a_very_long_word_shrinks_to_fit_instead_of_overflowing() {
+        let word = "x".repeat(200);
+        let (bw, bmp) = rasterize(&word);
+        let grid = scale_centered(&bmp, bw, 80, 23);
+        let (_, _, left, right) = ink_bbox(&grid).expect("word not drawn");
+        assert!(right < 80, "ink overflows the right edge: right {right}");
+        assert_eq!(left, 0, "a 200-letter word fills the whole width");
+    }
+
+    #[test]
+    fn build_frame_puts_each_line_at_column_zero_pads_to_width_and_feeds_nothing_after_the_last() {
+        // A bare \n moves down a row but keeps the column, so a line would be
+        // drawn off to the right of column 0 and vanish; \r returns the cursor
+        // to column 0. Padding to `width` clears a longer previous row, and no
+        // trailing feed keeps the screen from scrolling.
+        let lines = vec!["ab".to_string(), "abc".to_string()];
+        assert_eq!(build_frame(5, &lines), "\x1b[Hab   \r\nabc  ");
+    }
 }
