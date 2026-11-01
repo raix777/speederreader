@@ -1,0 +1,4 @@
+dejavuserif.ttf — DejaVu Serif (Bitstream Vera derivative).
+License: Bitstream Vera / DejaVu license (free, with font embedding exception).
+Bundled so the RSVP display renders words with a smooth anti-aliased serif
+independent of the host's installed fonts.

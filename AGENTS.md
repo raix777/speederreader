@@ -7,12 +7,14 @@ polished.
 
 Rust CLI that loads an EPUB (a ZIP with a small, well-defined XML layout) and
 shows its reading structure. By default it runs a rapid-serial display (RSVP):
-the book's words appear in the terminal one after the other, each drawn as giant
-block letters (a built-in 18-row variable-width font baked from Liberation
-Sans Bold) as big as fits while keeping its aspect
-ratio, centered on screen. A chapter/word summary is available with `--summary`,
-and the full text with `--text`. Pure Rust, no hardware; every behavior is
-unit-testable without an EPUB.
+the book's words appear in the terminal one after the other, each drawn in a
+smooth anti-aliased serif (a bundled DejaVu Serif, `assets/dejavuserif.ttf`,
+rasterized with `rusttype`) and balanced around a fixed vertical center line —
+a vowel near the middle of the word is highlighted in red as the recognition
+point (ORP) and placed on the line, the rest dimmed by distance. A
+chapter/word summary is available with `--summary`, and the full text with
+`--text`. Pure Rust, no hardware; every behavior is unit-testable without an
+EPUB.
 
 ## Layout — keep the three layers separate
 
@@ -30,16 +32,23 @@ bottom ones.
   `count_words`. Turns one XHTML document into plain text, in document order.
   Pure (string in, string out).
 - **Display** — `rsvp_display`, `display_loop`, `status_line`, `term_size`,
-  `build_frame`, `write_frame`, `draw_frame`, `draw_review_frame`, `wrap_text`,
-  and the block font `rasterize`/`scale_centered`/`glyph`. Talks to the terminal
-  only through `crossterm`.
+  `build_frame`, `visible_len`, `write_frame`, `draw_frame`,
+  `draw_review_frame`, `wrap_text`, and the word rendering: ORP selection
+  (`orp_index`, `letter_bright`), the embedded-font rasterization
+  (`load_font`, `word_advance`, `fit_em`, `rasterize_word`), and the pure
+  layout/color (`downsample`, `char_at`, `word_left_offset`, `word_frame`,
+  `half_block`, `paint_*`, `row_to_line`). Talks to the terminal only through
+  `crossterm`.
 
 Rules:
 - Keep the word-geometry and frame-assembly logic pure (no terminal I/O) so it
-  stays testable: `rasterize`, `scale_centered`, `glyph`, `wrap_text`, and
-  `build_frame` take plain values and return data. Only `rsvp_display`,
-  `display_loop`, `term_size`, and `write_frame` touch the terminal. All frame
-  output goes through `write_frame` → `build_frame`.
+  stays testable: `orp_index`, `letter_bright`, `downsample`, `char_at`,
+  `word_left_offset`, `word_frame`, `half_block`, `wrap_text`, `build_frame`,
+  and `visible_len` take plain values and return data. The embedded-font
+  functions (`load_font`, `word_advance`, `fit_em`, `rasterize_word`) are
+  deterministic but load the bundled font. Only `rsvp_display`, `display_loop`,
+  `term_size`, and `write_frame` touch the terminal. All frame output goes
+  through `write_frame` → `build_frame`.
 - Errors are `BoxedError` (`Box<dyn Error>`); load failures print to stderr and
   `exit(1)`.
 
@@ -47,7 +56,8 @@ Rules:
 
 - `cargo build --release`
 - `cargo test` — no EPUB or hardware needed; the in-module tests cover the pure
-  functions (`rasterize`, `scale_centered`, `build_frame`, ...).
+  functions (`orp_index`, `downsample`, `word_frame`, `build_frame`, ...) and
+  the embedded-font path (it ships in the repo, so it works offline).
 - `./target/release/speederreader [book.epub]` (defaults to `dummy.epub`).
   Flags: `--summary`/`-s` (chapter/word summary), `--text`/`-t` (full text),
   `--delay <s>` (starting pace), `--read`/`-r` (display — already the default).
@@ -64,7 +74,7 @@ Rules:
 - Clean code, self-explanatory: clear naming, small functions, straightforward
   structure. A reader should not need a comment to know what a line does.
 - Descriptive names for types, functions, fields, variables, and constants
-  (`Epub`, `parse_opf`, `scale_centered`, `SPEED_STEP`, `MIN_SPEED`).
+  (`Epub`, `parse_opf`, `orp_index`, `SPEED_STEP`, `MIN_SPEED`).
 - Separation of concerns: keep every working unit as small as possible; one unit
   does one thing.
 - Comments: avoid them. Add one only when it explains **why** — a decision,
@@ -75,8 +85,10 @@ Rules:
 
 ## Style (match the existing code)
 
-- Rust, edition 2021. Deps are lean (`zip`, `roxmltree`, `crossterm`); add a
-  dependency only when it clearly earns its place.
+- Rust, edition 2021. Deps are lean (`zip`, `roxmltree`, `crossterm`,
+  `rusttype`); add a dependency only when it clearly earns its place. The word
+  font is a bundled TTF (`assets/dejavuserif.ttf`) embedded via `include_bytes!`,
+  so the display does not depend on the host's installed fonts.
 - Constants are `UPPER_SNAKE_CASE` (`SPEED_STEP`, `MIN_SPEED`, `TRAIL_WORDS`).
 - Prefer `Option`/`Result` and early returns over deep nesting; use
   `saturating_*` arithmetic for the terminal geometry so nothing underflows on a

@@ -11,10 +11,13 @@ cargo run -- --text                # print the summary plus the full text
 
 By default the program shows the book's words in the terminal one at a time
 (RSVP, rapid-serial visual presentation), starting with the word changing every
-second (set a different start pace with `--delay`). Each word is rendered as
-giant block letters (a built-in 5x7 font) as big as fits while keeping its
-aspect ratio, centered in the terminal. The speed and progress (`[ n/total ]`)
-are shown on the status line at the top.
+second (set a different start pace with `--delay`). Each word is rendered in a
+smooth anti-aliased serif (a bundled DejaVu Serif) and balanced around a fixed
+vertical center line: a vowel near the middle of the word is highlighted in red
+as the recognition point and placed on the center line, while the rest of the
+word is dimmed by its distance from it. The pace in words/minute is shown in
+the bottom-right corner; the speed and progress (`[ n/total ]`) are on the
+status line at the top.
 
 Keys while the display is running:
 
